@@ -313,7 +313,7 @@
     </div>
 
     <footer>
-        ⚠️ 使用 Web Bluetooth 时，请使用支持该功能的浏览器（Chrome / Edge / Android WebView 等）。iOS 需使用支持 Web Bluetooth 的浏览器。
+        ⚠️ 使用 Web Bluetooth 时,请使用支持该功能的浏览器(Chrome / Edge / Android WebView) 等。iOS 需使用支持 Web Bluetooth 的浏览器(Bluefy)。
     </footer>
 
     <script>
@@ -472,7 +472,7 @@
             }
         }
 
-        // 创建图表
+        // 创建图表（优化轴标题显示）
         function createCharts(mode) {
             // 清理现有图表
             charts.forEach(chart => chart.destroy());
@@ -483,36 +483,36 @@
 
             switch (mode) {
                 case 'single':
-                    // 32个单独图表
+                    // 32个单独图表，高度从200px增加到220px
                     for (let i = 0; i < 32; i++) {
                         chartConfigs.push({
                             title: `通道 ${i + 1}`,
                             channels: [i],
-                            height: 200
+                            height: 220
                         });
                     }
                     break;
 
                 case 'group4':
-                    // 4通道一组，共8个图表
+                    // 4通道一组，高度从250px增加到280px
                     for (let group = 0; group < 8; group++) {
                         const startCh = group * 4;
                         chartConfigs.push({
                             title: `通道 ${startCh + 1}-${startCh + 4}`,
                             channels: [startCh, startCh + 1, startCh + 2, startCh + 3],
-                            height: 250
+                            height: 280
                         });
                     }
                     break;
 
                 case 'group8':
-                    // 8通道一组，共4个图表
+                    // 8通道一组，高度从300px增加到330px
                     for (let group = 0; group < 4; group++) {
                         const startCh = group * 8;
                         chartConfigs.push({
                             title: `通道 ${startCh + 1}-${startCh + 8}`,
                             channels: Array(8).fill().map((_, i) => startCh + i),
-                            height: 300
+                            height: 330
                         });
                     }
                     break;
@@ -551,6 +551,11 @@
                         responsive: true,
                         maintainAspectRatio: false,
                         animation: false,
+                        layout: {
+                            padding: {
+                                bottom: 25  // 为轴标题预留空间，防止裁剪
+                            }
+                        },
                         interaction: { intersect: false, mode: 'nearest' },
                         plugins: {
                             legend: { display: config.channels.length <= 8 },
@@ -876,7 +881,7 @@
             log(isPaused ? '采样已暂停，数据被忽略' : '采样已恢复');
         }
 
-        // 导出数据
+        // 导出数据（兼容手机端）
         function exportData() {
             if (typeof XLSX === 'undefined') {
                 alert('导出功能不可用：未加载 XLSX 库。');
@@ -943,8 +948,37 @@
             const timestampLabel = new Date().toISOString().replace(/[:.]/g, '-');
             const filename = `32ch_adc_${timestampLabel}.xlsx`;
 
-            XLSX.writeFile(workbook, filename);
-            log(`数据已导出为 ${filename}，包含 ${sortedTimes.length} 个采样点（最近180秒）`);
+            // ----- 手机兼容的下载方式 -----
+            try {
+                // 生成二进制字符串
+                const wbout = XLSX.write(workbook, { bookType: 'xlsx', type: 'binary' });
+
+                // 将二进制字符串转换为 ArrayBuffer
+                function s2ab(s) {
+                    const buf = new ArrayBuffer(s.length);
+                    const view = new Uint8Array(buf);
+                    for (let i = 0; i < s.length; i++) view[i] = s.charCodeAt(i) & 0xFF;
+                    return buf;
+                }
+
+                const buf = s2ab(wbout);
+                const blob = new Blob([buf], { type: 'application/octet-stream' });
+
+                // 创建下载链接并模拟点击
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+
+                log(`数据已导出为 ${filename}，包含 ${sortedTimes.length} 个采样点(最近180秒)`);
+            } catch (e) {
+                console.error('导出失败', e);
+                log('导出失败，请重试或检查浏览器兼容性');
+            }
         }
 
         // 切换显示模式
