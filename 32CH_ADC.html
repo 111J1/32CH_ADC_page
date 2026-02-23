@@ -1,0 +1,1015 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>32通道电压监测</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
+    <script
+        src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <style>
+        :root {
+            color-scheme: light dark;
+            font-family: 'Roboto', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background-color: #f4f6fb;
+            color: #1b1f29;
+        }
+
+        body {
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+        }
+
+        .page {
+            flex: 1;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: clamp(0.75rem, 3vw, 1.5rem);
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+            margin-bottom: 1rem;
+        }
+
+        .actions {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+        }
+
+        .view-modes {
+            display: flex;
+            gap: 0.5rem;
+            margin: 1rem 0;
+            flex-wrap: wrap;
+        }
+
+        h1 {
+            font-size: clamp(1.2rem, 4vw, 1.8rem);
+            margin: 0;
+        }
+
+        button {
+            padding: 0.75rem 1.5rem;
+            font-size: 0.9rem;
+            border-radius: 8px;
+            border: none;
+            cursor: pointer;
+            background: linear-gradient(135deg, #1d8cf8, #3358f4);
+            color: #fff;
+            font-weight: 500;
+            transition: transform 0.15s ease, opacity 0.15s ease;
+            min-width: 120px;
+        }
+
+        button.secondary {
+            background: linear-gradient(135deg, #f87575, #ff5e5e);
+        }
+
+        button.view-mode-btn {
+            padding: 0.5rem 1rem;
+            min-width: auto;
+            background: rgba(30, 44, 86, 0.1);
+            color: #3358f4;
+        }
+
+        button.view-mode-btn.active {
+            background: linear-gradient(135deg, #1d8cf8, #3358f4);
+            color: white;
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        button:hover:not(:disabled) {
+            transform: translateY(-1px);
+        }
+
+        .status-card {
+            background: rgba(255, 255, 255, 0.85);
+            border-radius: 16px;
+            padding: 1rem;
+            box-shadow: 0 20px 40px -30px rgba(31, 50, 103, 0.45);
+            backdrop-filter: blur(6px);
+            margin-bottom: 1rem;
+        }
+
+        .status-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.75rem;
+        }
+
+        .status-header span {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            font-size: 0.9rem;
+        }
+
+        .dot {
+            width: 0.65rem;
+            height: 0.65rem;
+            border-radius: 50%;
+            background-color: #c5c5d3;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.2);
+        }
+
+        .dot.online {
+            background-color: #1ec65d;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 0.5rem;
+            max-height: 200px;
+            overflow-y: auto;
+            padding: 0.5rem;
+        }
+
+        .metric-item {
+            background: rgba(30, 44, 86, 0.05);
+            border-radius: 12px;
+            padding: 0.75rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.15rem;
+        }
+
+        .metric-item span {
+            font-size: 0.8rem;
+            color: #5a6172;
+        }
+
+        .metric-item strong {
+            font-size: 1.1rem;
+            font-weight: 500;
+        }
+
+        .charts-container {
+            display: grid;
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .chart-wrapper {
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 16px;
+            padding: 1rem;
+            box-shadow: 0 20px 40px -30px rgba(31, 50, 103, 0.45);
+            position: relative;
+            height: 300px;
+        }
+
+        .chart-title {
+            font-size: 0.9rem;
+            font-weight: 500;
+            margin-bottom: 0.5rem;
+            color: #3358f4;
+        }
+
+        .log {
+            margin-top: 1rem;
+            font-size: 0.8rem;
+            color: #555a68;
+            background: rgba(255, 255, 255, 0.75);
+            border-radius: 12px;
+            padding: 0.75rem;
+            max-height: 150px;
+            overflow-y: auto;
+            box-shadow: inset 0 0 0 1px rgba(30, 44, 86, 0.04);
+        }
+
+        .log p {
+            margin: 0 0 0.25rem;
+            white-space: pre-wrap;
+            font-size: 0.8rem;
+        }
+
+        footer {
+            text-align: center;
+            font-size: 0.7rem;
+            color: #6b7284;
+            padding: 1rem 0;
+        }
+
+        @media (max-width: 768px) {
+            .charts-container {
+                grid-template-columns: 1fr;
+            }
+
+            .chart-wrapper {
+                height: 250px;
+            }
+
+            .metrics-grid {
+                grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+                max-height: 150px;
+            }
+
+            button {
+                padding: 0.5rem 1rem;
+                font-size: 0.8rem;
+                min-width: 100px;
+            }
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                background-color: #0f1729;
+                color: #eef2ff;
+            }
+
+            .status-card,
+            .chart-wrapper,
+            .log {
+                background: rgba(12, 21, 39, 0.85);
+                color: inherit;
+                box-shadow: 0 20px 40px -30px rgba(0, 0, 0, 0.6);
+            }
+
+            .metric-item {
+                background: rgba(255, 255, 255, 0.05);
+            }
+
+            .metric-item span {
+                color: #a8b0c7;
+            }
+
+            .log {
+                color: #a0abc6;
+            }
+
+            button {
+                background: linear-gradient(135deg, #3358f4, #1d8cf8);
+            }
+
+            button.secondary {
+                background: linear-gradient(135deg, #ff5e5e, #f87575);
+            }
+
+            button.view-mode-btn {
+                background: rgba(255, 255, 255, 0.1);
+                color: #a8b0c7;
+            }
+
+            button.view-mode-btn.active {
+                background: linear-gradient(135deg, #3358f4, #1d8cf8);
+                color: white;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="page">
+        <header>
+            <h1>32通道ADC电压监测</h1>
+            <div class="actions">
+                <button id="exportBtn" disabled>导出数据</button>
+                <button id="pauseBtn" class="secondary">暂停采样</button>
+                <button id="clearBtn" class="secondary">清除缓存</button>
+                <button id="connectBtn">连接蓝牙</button>
+            </div>
+        </header>
+
+        <div class="view-modes">
+            <button class="view-mode-btn active" data-mode="single">单通道显示</button>
+            <button class="view-mode-btn" data-mode="group4">4通道一组</button>
+            <button class="view-mode-btn" data-mode="group8">8通道一组</button>
+        </div>
+
+        <section class="status-card">
+            <div class="status-header">
+                <span><span class="dot" id="statusDot"></span><span id="statusText">等待连接</span></span>
+                <span id="timer">--:--</span>
+            </div>
+            <div class="metrics-grid" id="voltageMetrics">
+                <!-- 32个通道的电压值会动态生成 -->
+            </div>
+        </section>
+
+        <div class="charts-container" id="chartsContainer">
+            <!-- 图表会根据显示模式动态生成 -->
+        </div>
+
+        <section class="log" id="log"></section>
+    </div>
+
+    <footer>
+        ⚠️ 使用 Web Bluetooth 时，请使用支持该功能的浏览器（Chrome / Edge / Android WebView 等）。iOS 需使用支持 Web Bluetooth 的浏览器。
+    </footer>
+
+    <script>
+        // 蓝牙UUID配置
+        const SERVICE_UUID = 0x4321;
+        const PRIMARY_SERVICE = BluetoothUUID.getService(SERVICE_UUID);
+        const WRITE_CHAR_UUID = 0x4323;
+        const NOTIFY_CHAR_UUID = 0x4324;
+        const WRITE_CHAR = BluetoothUUID.getCharacteristic(WRITE_CHAR_UUID);
+        const NOTIFY_CHAR = BluetoothUUID.getCharacteristic(NOTIFY_CHAR_UUID);
+
+        // 时间配置
+        const DISPLAY_WINDOW_MS = 60 * 1000;      // 图表显示最近60秒
+        const STORAGE_WINDOW_MS = 180 * 1000;     // 数据存储最近180秒（用于导出）
+        const EXPORT_WINDOW_MS = STORAGE_WINDOW_MS; // 导出窗口与存储窗口一致
+        const EXPECTED_INTERVAL_MS = 100;
+
+        // DOM元素
+        const logElement = document.getElementById('log');
+        const connectBtn = document.getElementById('connectBtn');
+        const exportBtn = document.getElementById('exportBtn');
+        const pauseBtn = document.getElementById('pauseBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const voltageMetrics = document.getElementById('voltageMetrics');
+        const timerDisplay = document.getElementById('timer');
+        const chartsContainer = document.getElementById('chartsContainer');
+        const viewModeBtns = document.querySelectorAll('.view-mode-btn');
+
+        // 全局变量
+        let device;
+        let notifyCharacteristic;
+        let writeCharacteristic;
+        let charts = [];
+        let lastUpdate = 0;
+        let startTime = null; // 连接成功时设置为 Date.now()
+        let currentViewMode = 'single';
+        let isPaused = false;  // 暂停采样标志
+
+        // 32个通道的数据存储
+        const channelData = Array(32).fill().map(() => []);
+        const channelColors = [
+            '#3358f4', '#ff6b6b', '#1ec65d', '#ffd166',
+            '#06d6a0', '#118ab2', '#ef476f', '#7209b7',
+            '#f72585', '#3a0ca3', '#4361ee', '#4cc9f0',
+            '#ff9e00', '#ff5d8f', '#90be6d', '#577590',
+            '#f94144', '#f3722c', '#f8961e', '#f9844a',
+            '#f9c74f', '#90be6d', '#43aa8b', '#4d908e',
+            '#577590', '#277da1', '#264653', '#2a9d8f',
+            '#e9c46a', '#f4a261', '#e76f51', '#e63946'
+        ];
+
+        // 通道重映射表（根据您的要求修正）
+        const channelMapping = [
+            0,   // 原始0  V0A1  -> CH1 (目标0)
+            7,   // 原始1  V0B1  -> CH8 (目标7)
+            8,   // 原始2  V1A1  -> CH9 (目标8)
+            15,  // 原始3  V1B1  -> CH16 (目标15)
+            4,   // 原始4  V2A1  -> CH5 (目标4)
+            3,   // 原始5  V2B1  -> CH4 (目标3)
+            12,  // 原始6  V3A1  -> CH13 (目标12)
+            11,  // 原始7  V3B1  -> CH12 (目标11)
+            1,   // 原始8  V4A1  -> CH2 (目标1)
+            6,   // 原始9  V4B1  -> CH7 (目标6)
+            9,   // 原始10 V5A1  -> CH10 (目标9)
+            14,  // 原始11 V5B1  -> CH15 (目标14)
+            5,   // 原始12 V6A1  -> CH6 (目标5)
+            2,   // 原始13 V6B1  -> CH3 (目标2)
+            13,  // 原始14 V7A1  -> CH14 (目标13)
+            10,  // 原始15 V7B1  -> CH11 (目标10)
+            16,  // 原始16 V0A2  -> CH17 (目标16)
+            23,  // 原始17 V0B2  -> CH24 (目标23)
+            24,  // 原始18 V1A2  -> CH25 (目标24)
+            31,  // 原始19 V1B2  -> CH32 (目标31)
+            20,  // 原始20 V2A2  -> CH21 (目标20)
+            19,  // 原始21 V2B2  -> CH20 (目标19)
+            28,  // 原始22 V3A2  -> CH29 (目标28)
+            27,  // 原始23 V3B2  -> CH28 (目标27)
+            17,  // 原始24 V4A2  -> CH18 (目标17)
+            22,  // 原始25 V4B2  -> CH23 (目标22)
+            25,  // 原始26 V5A2  -> CH26 (目标25)
+            30,  // 原始27 V5B2  -> CH31 (目标30)
+            21,  // 原始28 V6A2  -> CH22 (目标21)
+            18,  // 原始29 V6B2  -> CH19 (目标18)
+            29,  // 原始30 V7A2  -> CH30 (目标29)
+            26   // 原始31 V7B2  -> CH27 (目标26)
+        ];
+
+        function initVoltageMetrics() {
+            voltageMetrics.innerHTML = '';
+            for (let i = 0; i < 32; i++) {
+                const metric = document.createElement('div');
+                metric.className = 'metric-item';
+                metric.innerHTML = `
+                    <span>CH${i + 1} (mV)</span>
+                    <strong id="voltage${i}">--</strong>
+                `;
+                voltageMetrics.appendChild(metric);
+            }
+        }
+
+        // 检查Web Bluetooth支持
+        function supportsWebBluetooth() {
+            return navigator.bluetooth && typeof navigator.bluetooth.requestDevice === 'function';
+        }
+
+        // 日志记录
+        function log(message) {
+            const time = new Date().toLocaleTimeString();
+            const entry = document.createElement('p');
+            entry.textContent = `[${time}] ${message}`;
+            logElement.prepend(entry);
+            const maxEntries = 60;
+            while (logElement.children.length > maxEntries) {
+                logElement.removeChild(logElement.lastChild);
+            }
+        }
+
+        // 更新连接状态
+        function updateStatus(connected, text) {
+            statusDot.classList.toggle('online', connected);
+            statusText.textContent = text;
+            connectBtn.textContent = connected ? '断开连接' : '连接蓝牙';
+        }
+
+        // 启动定时器
+        function startTimer() {
+            startTime = Date.now();
+            updateTimer();
+        }
+
+        // 停止定时器
+        function stopTimer() {
+            timerDisplay.textContent = '--:--';
+        }
+
+        // 更新定时器显示
+        function updateTimer() {
+            if (!startTime) return;
+            const elapsed = Date.now() - startTime;
+            const minutes = Math.floor(elapsed / 60000);
+            const seconds = Math.floor((elapsed % 60000) / 1000);
+            timerDisplay.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+            requestAnimationFrame(updateTimer);
+        }
+
+        // 清理超过指定时间窗口的旧数据
+        function cleanupOldData(windowMs = STORAGE_WINDOW_MS) {
+            const now = Date.now();
+            const cutoff = now - windowMs;
+            for (let i = 0; i < 32; i++) {
+                while (channelData[i].length > 0 && channelData[i][0].timestamp < cutoff) {
+                    channelData[i].shift();
+                }
+            }
+        }
+
+        // 创建图表
+        function createCharts(mode) {
+            // 清理现有图表
+            charts.forEach(chart => chart.destroy());
+            charts = [];
+            chartsContainer.innerHTML = '';
+
+            let chartConfigs = [];
+
+            switch (mode) {
+                case 'single':
+                    // 32个单独图表
+                    for (let i = 0; i < 32; i++) {
+                        chartConfigs.push({
+                            title: `通道 ${i + 1}`,
+                            channels: [i],
+                            height: 200
+                        });
+                    }
+                    break;
+
+                case 'group4':
+                    // 4通道一组，共8个图表
+                    for (let group = 0; group < 8; group++) {
+                        const startCh = group * 4;
+                        chartConfigs.push({
+                            title: `通道 ${startCh + 1}-${startCh + 4}`,
+                            channels: [startCh, startCh + 1, startCh + 2, startCh + 3],
+                            height: 250
+                        });
+                    }
+                    break;
+
+                case 'group8':
+                    // 8通道一组，共4个图表
+                    for (let group = 0; group < 4; group++) {
+                        const startCh = group * 8;
+                        chartConfigs.push({
+                            title: `通道 ${startCh + 1}-${startCh + 8}`,
+                            channels: Array(8).fill().map((_, i) => startCh + i),
+                            height: 300
+                        });
+                    }
+                    break;
+            }
+
+            // 创建图表
+            chartConfigs.forEach((config) => {
+                const wrapper = document.createElement('div');
+                wrapper.className = 'chart-wrapper';
+                wrapper.style.height = `${config.height}px`;
+
+                const title = document.createElement('div');
+                title.className = 'chart-title';
+                title.textContent = config.title;
+                wrapper.appendChild(title);
+
+                const canvas = document.createElement('canvas');
+                wrapper.appendChild(canvas);
+                chartsContainer.appendChild(wrapper);
+
+                // 创建数据集
+                const datasets = config.channels.map(ch => ({
+                    label: `CH${ch + 1}`,
+                    data: [],
+                    borderColor: channelColors[ch],
+                    backgroundColor: channelColors[ch] + '20',
+                    tension: 0.1,
+                    pointRadius: 0,
+                    borderWidth: 1
+                }));
+
+                const chart = new Chart(canvas, {
+                    type: 'line',
+                    data: { datasets },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false,
+                        interaction: { intersect: false, mode: 'nearest' },
+                        plugins: {
+                            legend: { display: config.channels.length <= 8 },
+                            tooltip: {
+                                callbacks: {
+                                    label: (context) => {
+                                        const label = context.dataset.label || '';
+                                        const y = context.parsed.y.toFixed(3) + 'V';
+                                        return `${label}: ${y}`;
+                                    }
+                                }
+                            }
+                        },
+                        scales: {
+                            x: {
+                                type: 'linear', // 线性轴，显示相对时间（秒）
+                                position: 'bottom',
+                                title: {
+                                    display: true,
+                                    text: '时间 (s)'
+                                },
+                                ticks: {
+                                    callback: function (value) {
+                                        return value.toFixed(0) + 's';
+                                    }
+                                },
+                                min: 0,
+                                max: 0 // 动态更新
+                            },
+                            y: {
+                                beginAtZero: false,
+                                ticks: { callback: value => Number(value).toFixed(2) },
+                                title: { display: true, text: '电压 (V)' }
+                            }
+                        }
+                    }
+                });
+
+                charts.push(chart);
+            });
+        }
+
+        // 更新所有图表（只显示最近60秒的数据，X轴范围为当前时间-60s 到 当前时间）
+        function updateCharts() {
+            if (!startTime) return; // 尚未开始计时
+
+            const now = Date.now();
+            const currentMaxTime = (now - startTime) / 1000; // 当前相对秒数
+            const displayCutoff = now - DISPLAY_WINDOW_MS; // 显示时间戳下限
+
+            // 计算X轴范围：固定60秒滑动窗口
+            const WINDOW_SECONDS = 60;
+            let xMin, xMax;
+            if (currentMaxTime > WINDOW_SECONDS) {
+                xMin = currentMaxTime - WINDOW_SECONDS;
+                xMax = currentMaxTime;
+            } else {
+                xMin = 0;
+                xMax = WINDOW_SECONDS; // 数据不足60秒时，X轴仍显示0-60秒
+            }
+
+            charts.forEach(chart => {
+                // 收集该图表所有通道的当前显示数据点（用于Y轴范围计算）
+                let allVoltages = [];
+
+                chart.data.datasets.forEach(dataset => {
+                    const channelIndex = dataset.label.match(/CH(\d+)/)[1] - 1;
+                    const channelPoints = channelData[channelIndex];
+                    // 过滤出最近60秒的点，并转换为相对时间
+                    const points = channelPoints
+                        .filter(p => p.timestamp >= displayCutoff)
+                        .map(p => ({
+                            x: (p.timestamp - startTime) / 1000,
+                            y: p.voltage
+                        }));
+                    dataset.data = points;
+                    // 收集电压值用于Y轴范围
+                    allVoltages = allVoltages.concat(points.map(p => p.y));
+                });
+
+                // 计算并设置Y轴范围，保证最小范围 ±500mV (0.5V)
+                if (allVoltages.length > 0) {
+                    let minV = Math.min(...allVoltages);
+                    let maxV = Math.max(...allVoltages);
+                    const range = maxV - minV;
+                    const MIN_RANGE = 0.5; // 500mV = 0.5V
+                    if (range < MIN_RANGE) {
+                        const center = (maxV + minV) / 2;
+                        minV = center - MIN_RANGE / 2;
+                        maxV = center + MIN_RANGE / 2;
+                    }
+                    // 添加一点padding，使曲线不紧贴边缘
+                    const padding = (maxV - minV) * 0.1;
+                    chart.options.scales.y.min = minV - padding;
+                    chart.options.scales.y.max = maxV + padding;
+                } else {
+                    chart.options.scales.y.min = undefined;
+                    chart.options.scales.y.max = undefined;
+                }
+
+                // 设置X轴为固定60秒滑动窗口
+                chart.options.scales.x.min = xMin;
+                chart.options.scales.x.max = xMax;
+
+                chart.update('none');
+            });
+        }
+
+        // 处理蓝牙通知数据
+        function handleNotification(event) {
+            // 如果处于暂停状态，直接忽略数据
+            if (isPaused) {
+                return;
+            }
+
+            const dataView = event.target.value;
+
+            // 检查数据长度：32个浮点数 * 4字节 = 128字节
+            if (dataView.byteLength < 128) {
+                log(`数据长度不足：${dataView.byteLength} 字节，期望 128 字节`);
+                return;
+            }
+
+            const timestamp = Date.now();
+            const voltages = [];
+
+            // 解析32个浮点数
+            for (let i = 0; i < 32; i++) {
+                const voltage = dataView.getFloat32(i * 4, true); // mV单位
+                voltages.push(voltage);
+            }
+
+            // 根据映射表重新排列通道
+            const mappedVoltages = new Array(32);
+            for (let i = 0; i < 32; i++) {
+                mappedVoltages[channelMapping[i]] = voltages[i];
+            }
+
+            // 更新每个通道的数据和显示
+            for (let i = 0; i < 32; i++) {
+                const voltage = mappedVoltages[i];
+                const voltageV = voltage / 1000; // 转换为V单位
+
+                // 更新显示值
+                const voltageElement = document.getElementById(`voltage${i}`);
+                if (voltageElement) {
+                    voltageElement.textContent = voltage.toFixed(1);
+                }
+
+                // 存储数据
+                channelData[i].push({
+                    timestamp,
+                    voltage: voltageV,
+                    voltageMillivolt: voltage
+                });
+            }
+
+            // 清理超过存储窗口的数据
+            cleanupOldData(STORAGE_WINDOW_MS);
+
+            // 更新采样率显示
+            computeSamplingRate();
+
+            // 检查数据间隔
+            const frameInterval = lastUpdate ? timestamp - lastUpdate : EXPECTED_INTERVAL_MS;
+            lastUpdate = timestamp;
+
+            if (Math.abs(frameInterval - EXPECTED_INTERVAL_MS) > 50) {
+                log(`数据间隔异常：${frameInterval.toFixed(0)} ms`);
+            }
+
+            // 更新图表
+            requestAnimationFrame(updateCharts);
+        }
+
+        // 计算采样频率
+        function computeSamplingRate() {
+            if (channelData[0].length < 2) return;
+
+            const firstTime = channelData[0][0].timestamp;
+            const lastTime = channelData[0][channelData[0].length - 1].timestamp;
+            const durationMs = lastTime - firstTime;
+
+            if (durationMs <= 0) return;
+
+            const frequency = channelData[0].length / (durationMs / 1000);
+            log(`采样频率：${frequency.toFixed(1)} Hz`);
+        }
+
+        // 连接蓝牙
+        async function connect() {
+            if (!supportsWebBluetooth()) {
+                log('当前浏览器不支持 Web Bluetooth。');
+                alert('当前浏览器不支持 Web Bluetooth，请尝试使用 Chrome、Edge 或 Android WebView。');
+                return;
+            }
+
+            try {
+                updateStatus(false, '正在搜索设备...');
+                device = await navigator.bluetooth.requestDevice({
+                    filters: [{ services: [PRIMARY_SERVICE] }],
+                    optionalServices: [PRIMARY_SERVICE]
+                });
+
+                device.addEventListener('gattserverdisconnected', handleDisconnection);
+                updateStatus(false, '正在建立连接...');
+
+                const server = await device.gatt.connect();
+                const service = await server.getPrimaryService(PRIMARY_SERVICE);
+                writeCharacteristic = await service.getCharacteristic(WRITE_CHAR);
+                notifyCharacteristic = await service.getCharacteristic(NOTIFY_CHAR);
+
+                await notifyCharacteristic.startNotifications();
+                notifyCharacteristic.addEventListener('characteristicvaluechanged', handleNotification);
+
+                // 初始化数据
+                for (let i = 0; i < 32; i++) {
+                    channelData[i] = [];
+                }
+
+                // 创建图表
+                createCharts(currentViewMode);
+
+                // 启用导出按钮
+                exportBtn.disabled = false;
+
+                // 启动定时器（设置startTime）
+                startTimer();
+
+                // 重置暂停状态为false
+                isPaused = false;
+                pauseBtn.textContent = '暂停采样';
+
+                updateStatus(true, `已连接: ${device.name || '未知设备'}`);
+                log('蓝牙连接成功，开始接收32通道电压数据。');
+
+            } catch (error) {
+                log(`连接失败：${error.message}`);
+                updateStatus(false, '连接失败，请重试');
+
+                if (device && device.gatt && device.gatt.connected) {
+                    device.gatt.disconnect();
+                }
+            }
+        }
+
+        // 断开连接
+        async function disconnect() {
+            if (notifyCharacteristic) {
+                try {
+                    await notifyCharacteristic.stopNotifications();
+                } catch (error) {
+                    log(`停止通知失败：${error.message}`);
+                }
+            }
+
+            if (device && device.gatt && device.gatt.connected) {
+                device.gatt.disconnect();
+            }
+
+            notifyCharacteristic = null;
+            writeCharacteristic = null;
+            updateStatus(false, '已断开连接');
+            stopTimer(); // 停止计时器，但保留startTime以便图表显示
+            exportBtn.disabled = true;
+            log('蓝牙连接已断开。');
+        }
+
+        // 处理断开连接事件
+        function handleDisconnection() {
+            updateStatus(false, '已断开连接');
+            log('蓝牙连接已断开。');
+            stopTimer();
+        }
+
+        // 清除所有缓存和显示数据（重置计时）
+        function clearAllData() {
+            // 清除所有通道数据
+            for (let i = 0; i < 32; i++) {
+                channelData[i] = [];
+            }
+
+            // 重置电压显示为"--"
+            for (let i = 0; i < 32; i++) {
+                const voltageElement = document.getElementById(`voltage${i}`);
+                if (voltageElement) {
+                    voltageElement.textContent = '--';
+                }
+            }
+
+            // 重置开始时间为当前时间（重新计时）
+            startTime = Date.now();
+
+            // 重置最后更新时间
+            lastUpdate = 0;
+
+            // 重置暂停状态为false
+            isPaused = false;
+            pauseBtn.textContent = '暂停采样';
+
+            // 清除图表数据
+            charts.forEach(chart => {
+                chart.data.datasets.forEach(dataset => {
+                    dataset.data = [];
+                });
+                chart.update('none');
+            });
+
+            // 禁用导出按钮（因为无数据）
+            exportBtn.disabled = true;
+
+            log('已清除所有缓存和显示数据，时间从当前重新开始');
+        }
+
+        // 切换暂停/恢复采样
+        function togglePause() {
+            if (!device || !device.gatt || !device.gatt.connected) {
+                log('未连接设备，无法暂停');
+                return;
+            }
+            isPaused = !isPaused;
+            pauseBtn.textContent = isPaused ? '恢复采样' : '暂停采样';
+            log(isPaused ? '采样已暂停，数据被忽略' : '采样已恢复');
+        }
+
+        // 导出数据
+        function exportData() {
+            if (typeof XLSX === 'undefined') {
+                alert('导出功能不可用：未加载 XLSX 库。');
+                return;
+            }
+
+            // 获取存储窗口内的数据（最近180秒）
+            const now = Date.now();
+            const cutoff = now - STORAGE_WINDOW_MS;
+
+            // 收集所有时间点
+            const timeSet = new Set();
+            const channelSamples = channelData.map(channel => {
+                return channel.filter(item => item.timestamp >= cutoff);
+            });
+
+            channelSamples.forEach(samples => {
+                samples.forEach(sample => {
+                    timeSet.add(sample.timestamp);
+                });
+            });
+
+            const sortedTimes = Array.from(timeSet).sort((a, b) => a - b);
+
+            if (sortedTimes.length === 0) {
+                log(`${STORAGE_WINDOW_MS / 1000}秒内无数据可导出。`);
+                return;
+            }
+
+            // 创建行数据
+            const rows = sortedTimes.map(timestamp => {
+                const row = {
+                    '时间': new Date(timestamp).toLocaleString('zh-CN', {
+                        year: 'numeric',
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit'
+                    }),
+                    '时间戳': timestamp
+                };
+
+                // 添加每个通道的电压值
+                for (let i = 0; i < 32; i++) {
+                    const sample = channelSamples[i].find(s => s.timestamp === timestamp);
+                    row[`CH${i + 1} (mV)`] = sample ? sample.voltageMillivolt.toFixed(1) : '';
+                    row[`CH${i + 1} (V)`] = sample ? (sample.voltageMillivolt / 1000).toFixed(4) : '';
+                }
+
+                return row;
+            });
+
+            // 创建表头
+            const headers = ['时间', '时间戳'];
+            for (let i = 0; i < 32; i++) {
+                headers.push(`CH${i + 1} (mV)`, `CH${i + 1} (V)`);
+            }
+
+            const worksheet = XLSX.utils.json_to_sheet(rows, { header: headers });
+            const workbook = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(workbook, worksheet, '32通道电压数据');
+
+            const timestampLabel = new Date().toISOString().replace(/[:.]/g, '-');
+            const filename = `32ch_adc_${timestampLabel}.xlsx`;
+
+            XLSX.writeFile(workbook, filename);
+            log(`数据已导出为 ${filename}，包含 ${sortedTimes.length} 个采样点（最近180秒）`);
+        }
+
+        // 切换显示模式
+        function setViewMode(mode) {
+            currentViewMode = mode;
+
+            // 更新按钮状态
+            viewModeBtns.forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.mode === mode);
+            });
+
+            // 重新创建图表
+            if (device && device.gatt && device.gatt.connected) {
+                createCharts(mode);
+                updateCharts();
+                log(`切换显示模式为: ${getModeName(mode)}`);
+            } else {
+                // 未连接时也可以预览空图表
+                createCharts(mode);
+            }
+        }
+
+        // 获取模式名称
+        function getModeName(mode) {
+            const names = {
+                'single': '单通道显示',
+                'group4': '4通道一组',
+                'group8': '8通道一组'
+            };
+            return names[mode] || mode;
+        }
+
+        // 事件监听
+        connectBtn.addEventListener('click', async () => {
+            if (device && device.gatt && device.gatt.connected) {
+                await disconnect();
+            } else {
+                connectBtn.disabled = true;
+                await connect();
+                connectBtn.disabled = false;
+            }
+        });
+
+        exportBtn.addEventListener('click', exportData);
+
+        pauseBtn.addEventListener('click', togglePause);
+
+        clearBtn.addEventListener('click', () => {
+            if (confirm('确定要清除所有缓存和显示数据吗？此操作不可撤销。')) {
+                clearAllData();
+            }
+        });
+
+        viewModeBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                setViewMode(btn.dataset.mode);
+            });
+        });
+
+        // 初始化
+        initVoltageMetrics();
+        createCharts(currentViewMode);
+
+        log('32通道ADC电压监测系统已就绪');
+    </script>
+</body>
+
+</html>
