@@ -90,6 +90,12 @@
             color: white;
         }
 
+        button.view-mode-btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            transform: none;
+        }
+
         button:disabled {
             opacity: 0.6;
             cursor: not-allowed;
@@ -209,6 +215,29 @@
             padding: 1rem 0;
         }
 
+        .hidden {
+            display: none !important;
+        }
+
+        .sampling-hint {
+            margin: 0 0 1rem;
+            padding: 0.6rem 0.9rem;
+            border-radius: 10px;
+            font-size: 0.75rem;
+            color: #7a6200;
+            background: rgba(255, 209, 102, 0.2);
+            border: 1px solid rgba(255, 209, 102, 0.5);
+            line-height: 1.5;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            .sampling-hint {
+                color: #ffd166;
+                background: rgba(255, 209, 102, 0.08);
+                border-color: rgba(255, 209, 102, 0.25);
+            }
+        }
+
         @media (max-width: 768px) {
             .charts-container {
                 grid-template-columns: 1fr;
@@ -293,6 +322,7 @@
             <button class="view-mode-btn active" data-mode="single">单通道显示</button>
             <button class="view-mode-btn" data-mode="group4">4通道一组</button>
             <button class="view-mode-btn" data-mode="group8">8通道一组</button>
+            <button id="samplingModeBtn" class="view-mode-btn">采样模式</button>
         </div>
 
         <section class="status-card">
@@ -308,6 +338,10 @@
         <div class="charts-container" id="chartsContainer">
             <!-- 图表会根据显示模式动态生成 -->
         </div>
+
+        <p id="samplingHint" class="sampling-hint hidden">
+            ⚠️ 采样时间越长，导出数据花费的时间越长。若点击导出后出现页面无响应，请耐心等待，导出完成后页面将自动恢复。
+        </p>
 
         <section class="log" id="log"></section>
     </div>
@@ -326,9 +360,10 @@
         const NOTIFY_CHAR = BluetoothUUID.getCharacteristic(NOTIFY_CHAR_UUID);
 
         // 时间配置
-        const DISPLAY_WINDOW_MS = 60 * 1000;      // 图表显示最近60秒
-        const STORAGE_WINDOW_MS = 180 * 1000;     // 数据存储最近180秒（用于导出）
-        const EXPORT_WINDOW_MS = STORAGE_WINDOW_MS; // 导出窗口与存储窗口一致
+        // 图表模式：只保留最近60秒数据，不额外缓存
+        const DISPLAY_WINDOW_MS = 60 * 1000;
+        // 采样模式：最多采样5分钟，到时自动停止
+        const SAMPLING_MAX_MS = 5 * 60 * 1000;
         const EXPECTED_INTERVAL_MS = 100;
 
         // DOM元素
@@ -342,7 +377,9 @@
         const voltageMetrics = document.getElementById('voltageMetrics');
         const timerDisplay = document.getElementById('timer');
         const chartsContainer = document.getElementById('chartsContainer');
-        const viewModeBtns = document.querySelectorAll('.view-mode-btn');
+        const samplingHint = document.getElementById('samplingHint');
+        const viewModeBtns = document.querySelectorAll('.view-mode-btn:not(#samplingModeBtn)'); // 三个显示模式按钮
+        const samplingModeBtn = document.getElementById('samplingModeBtn');
 
         // 全局变量
         let device;
@@ -350,12 +387,34 @@
         let writeCharacteristic;
         let charts = [];
         let lastUpdate = 0;
-        let startTime = null; // 连接成功时设置为 Date.now()
+        let startTime = null;
         let currentViewMode = 'single';
-        let isPaused = false;  // 暂停采样标志
+        let isPaused = true;           // 初始为暂停状态，等待手动恢复
+        let samplingModeActive = false; // 采样模式标志
+        let samplingStartTime = null;   // 采样模式开始时间（用于5分钟上限计算）
 
         // 32个通道的数据存储
         const channelData = Array(32).fill().map(() => []);
+
+        // 性能优化：渲染解耦相关变量
+        let renderLoopId = null;           // UI渲染定时器
+        let timerIntervalId = null;        // 计时器（改为1Hz，不再用60fps rAF）
+        let keepAliveId = null;            // BLE心跳定时器
+        let lastCleanupTime = 0;           // 上次清理旧数据的时间
+        let lastSampleRateLogTime = 0;     // 上次输出采样率日志的时间
+        const sampleTimestamps = [];       // 滑动窗口：记录最近N次收包时间，用于精确采样率计算
+        const SAMPLE_RATE_WINDOW = 60;     // 滑动窗口大小
+        const RENDER_INTERVAL_MS = 100;    // UI刷新间隔 10Hz
+        const CLEANUP_INTERVAL_MS = 5000;  // 清理旧数据间隔 5秒
+        const SAMPLE_LOG_INTERVAL_MS = 3000; // 采样率日志间隔 3秒
+        // ── BLE Keep-alive 配置 ──────────────────────────────────────────────
+        // 原理：BLE连接建立后，Android/iOS 电源管理会在数秒内将连接间隔从
+        // 7.5ms（高性能）自动扩展到 ≥85ms（省电），导致采样率从 20Hz 降至 12Hz。
+        // 该过程与 JS 渲染无关，在采样模式下同样会发生。
+        // 解决：每隔 500ms 向 writeCharacteristic 发一次 1 字节心跳写操作，
+        // 维持双向 BLE 流量，使 OS 保持短连接间隔（高性能模式）。
+        const KEEP_ALIVE_INTERVAL_MS = 500;
+        const KEEP_ALIVE_PAYLOAD = new Uint8Array([0x00]); // 1字节心跳包
         const channelColors = [
             '#3358f4', '#ff6b6b', '#1ec65d', '#ffd166',
             '#06d6a0', '#118ab2', '#ef476f', '#7209b7',
@@ -416,12 +475,10 @@
             }
         }
 
-        // 检查Web Bluetooth支持
         function supportsWebBluetooth() {
             return navigator.bluetooth && typeof navigator.bluetooth.requestDevice === 'function';
         }
 
-        // 日志记录
         function log(message) {
             const time = new Date().toLocaleTimeString();
             const entry = document.createElement('p');
@@ -433,32 +490,41 @@
             }
         }
 
-        // 更新连接状态
         function updateStatus(connected, text) {
             statusDot.classList.toggle('online', connected);
             statusText.textContent = text;
             connectBtn.textContent = connected ? '断开连接' : '连接蓝牙';
         }
 
-        // 启动定时器
         function startTimer() {
             startTime = Date.now();
-            updateTimer();
+            if (timerIntervalId) clearInterval(timerIntervalId);
+            timerIntervalId = setInterval(() => {
+                if (!startTime) return;
+                const elapsed = Date.now() - startTime;
+                const minutes = Math.floor(elapsed / 60000);
+                const seconds = Math.floor((elapsed % 60000) / 1000);
+                timerDisplay.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+            }, 1000);
         }
 
-        // 停止定时器
         function stopTimer() {
+            if (timerIntervalId) { clearInterval(timerIntervalId); timerIntervalId = null; }
             timerDisplay.textContent = '--:--';
         }
 
-        // 更新定时器显示
-        function updateTimer() {
-            if (!startTime) return;
-            const elapsed = Date.now() - startTime;
-            const minutes = Math.floor(elapsed / 60000);
-            const seconds = Math.floor((elapsed % 60000) / 1000);
-            timerDisplay.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-            requestAnimationFrame(updateTimer);
+        // 二分查找辅助函数
+        function binarySearchFirst(arr, target) {
+            let low = 0, high = arr.length - 1;
+            while (low <= high) {
+                const mid = Math.floor((low + high) / 2);
+                if (arr[mid].timestamp < target) {
+                    low = mid + 1;
+                } else {
+                    high = mid - 1;
+                }
+            }
+            return low;
         }
 
         // 清理超过指定时间窗口的旧数据
@@ -466,15 +532,17 @@
             const now = Date.now();
             const cutoff = now - windowMs;
             for (let i = 0; i < 32; i++) {
-                while (channelData[i].length > 0 && channelData[i][0].timestamp < cutoff) {
-                    channelData[i].shift();
+                const arr = channelData[i];
+                if (arr.length === 0) continue;
+                const startIdx = binarySearchFirst(arr, cutoff);
+                if (startIdx > 0) {
+                    channelData[i] = arr.slice(startIdx);
                 }
             }
         }
 
-        // 创建图表（优化轴标题显示）
+        // 创建图表
         function createCharts(mode) {
-            // 清理现有图表
             charts.forEach(chart => chart.destroy());
             charts = [];
             chartsContainer.innerHTML = '';
@@ -483,7 +551,6 @@
 
             switch (mode) {
                 case 'single':
-                    // 32个单独图表，高度从200px增加到220px
                     for (let i = 0; i < 32; i++) {
                         chartConfigs.push({
                             title: `通道 ${i + 1}`,
@@ -492,9 +559,7 @@
                         });
                     }
                     break;
-
                 case 'group4':
-                    // 4通道一组，高度从250px增加到280px
                     for (let group = 0; group < 8; group++) {
                         const startCh = group * 4;
                         chartConfigs.push({
@@ -504,9 +569,7 @@
                         });
                     }
                     break;
-
                 case 'group8':
-                    // 8通道一组，高度从300px增加到330px
                     for (let group = 0; group < 4; group++) {
                         const startCh = group * 8;
                         chartConfigs.push({
@@ -518,7 +581,6 @@
                     break;
             }
 
-            // 创建图表
             chartConfigs.forEach((config) => {
                 const wrapper = document.createElement('div');
                 wrapper.className = 'chart-wrapper';
@@ -533,7 +595,6 @@
                 wrapper.appendChild(canvas);
                 chartsContainer.appendChild(wrapper);
 
-                // 创建数据集
                 const datasets = config.channels.map(ch => ({
                     label: `CH${ch + 1}`,
                     data: [],
@@ -551,11 +612,7 @@
                         responsive: true,
                         maintainAspectRatio: false,
                         animation: false,
-                        layout: {
-                            padding: {
-                                bottom: 25  // 为轴标题预留空间，防止裁剪
-                            }
-                        },
+                        layout: { padding: { bottom: 25 } },
                         interaction: { intersect: false, mode: 'nearest' },
                         plugins: {
                             legend: { display: config.channels.length <= 8 },
@@ -571,19 +628,12 @@
                         },
                         scales: {
                             x: {
-                                type: 'linear', // 线性轴，显示相对时间（秒）
+                                type: 'linear',
                                 position: 'bottom',
-                                title: {
-                                    display: true,
-                                    text: '时间 (s)'
-                                },
-                                ticks: {
-                                    callback: function (value) {
-                                        return value.toFixed(0) + 's';
-                                    }
-                                },
+                                title: { display: true, text: '时间 (s)' },
+                                ticks: { callback: value => value.toFixed(0) + 's' },
                                 min: 0,
-                                max: 0 // 动态更新
+                                max: 0
                             },
                             y: {
                                 beginAtZero: false,
@@ -598,15 +648,13 @@
             });
         }
 
-        // 更新所有图表（只显示最近60秒的数据，X轴范围为当前时间-60s 到 当前时间）
+        // 更新所有图表（优化版）
         function updateCharts() {
-            if (!startTime) return; // 尚未开始计时
+            if (!startTime) return;
 
             const now = Date.now();
-            const currentMaxTime = (now - startTime) / 1000; // 当前相对秒数
-            const displayCutoff = now - DISPLAY_WINDOW_MS; // 显示时间戳下限
-
-            // 计算X轴范围：固定60秒滑动窗口
+            const currentMaxTime = (now - startTime) / 1000;
+            const displayCutoff = now - DISPLAY_WINDOW_MS;
             const WINDOW_SECONDS = 60;
             let xMin, xMax;
             if (currentMaxTime > WINDOW_SECONDS) {
@@ -614,40 +662,43 @@
                 xMax = currentMaxTime;
             } else {
                 xMin = 0;
-                xMax = WINDOW_SECONDS; // 数据不足60秒时，X轴仍显示0-60秒
+                xMax = WINDOW_SECONDS;
+            }
+
+            // 预计算每个通道的显示数据点
+            const displayPointsPerChannel = new Array(32);
+            for (let i = 0; i < 32; i++) {
+                const channelPoints = channelData[i];
+                if (channelPoints.length === 0) {
+                    displayPointsPerChannel[i] = [];
+                    continue;
+                }
+                const startIdx = binarySearchFirst(channelPoints, displayCutoff);
+                displayPointsPerChannel[i] = channelPoints.slice(startIdx).map(p => ({
+                    x: (p.timestamp - startTime) / 1000,
+                    y: p.voltage
+                }));
             }
 
             charts.forEach(chart => {
-                // 收集该图表所有通道的当前显示数据点（用于Y轴范围计算）
                 let allVoltages = [];
-
                 chart.data.datasets.forEach(dataset => {
                     const channelIndex = dataset.label.match(/CH(\d+)/)[1] - 1;
-                    const channelPoints = channelData[channelIndex];
-                    // 过滤出最近60秒的点，并转换为相对时间
-                    const points = channelPoints
-                        .filter(p => p.timestamp >= displayCutoff)
-                        .map(p => ({
-                            x: (p.timestamp - startTime) / 1000,
-                            y: p.voltage
-                        }));
+                    const points = displayPointsPerChannel[channelIndex] || [];
                     dataset.data = points;
-                    // 收集电压值用于Y轴范围
                     allVoltages = allVoltages.concat(points.map(p => p.y));
                 });
 
-                // 计算并设置Y轴范围，保证最小范围 ±500mV (0.5V)
                 if (allVoltages.length > 0) {
                     let minV = Math.min(...allVoltages);
                     let maxV = Math.max(...allVoltages);
                     const range = maxV - minV;
-                    const MIN_RANGE = 0.5; // 500mV = 0.5V
+                    const MIN_RANGE = 0.5;
                     if (range < MIN_RANGE) {
                         const center = (maxV + minV) / 2;
                         minV = center - MIN_RANGE / 2;
                         maxV = center + MIN_RANGE / 2;
                     }
-                    // 添加一点padding，使曲线不紧贴边缘
                     const padding = (maxV - minV) * 0.1;
                     chart.options.scales.y.min = minV - padding;
                     chart.options.scales.y.max = maxV + padding;
@@ -656,100 +707,146 @@
                     chart.options.scales.y.max = undefined;
                 }
 
-                // 设置X轴为固定60秒滑动窗口
                 chart.options.scales.x.min = xMin;
                 chart.options.scales.x.max = xMax;
-
                 chart.update('none');
             });
         }
 
-        // 处理蓝牙通知数据
+        // 处理蓝牙通知数据（纯数据写入，不做任何DOM/图表操作）
         function handleNotification(event) {
-            // 如果处于暂停状态，直接忽略数据
-            if (isPaused) {
-                return;
-            }
+            if (isPaused) return;
 
             const dataView = event.target.value;
-
-            // 检查数据长度：32个浮点数 * 4字节 = 128字节
             if (dataView.byteLength < 128) {
+                // 仅记录，不影响主流程
                 log(`数据长度不足：${dataView.byteLength} 字节，期望 128 字节`);
                 return;
             }
 
             const timestamp = Date.now();
-            const voltages = [];
 
-            // 解析32个浮点数
-            for (let i = 0; i < 32; i++) {
-                const voltage = dataView.getFloat32(i * 4, true); // mV单位
-                voltages.push(voltage);
-            }
-
-            // 根据映射表重新排列通道
+            // 解析 32 路 float32（little-endian）
             const mappedVoltages = new Array(32);
             for (let i = 0; i < 32; i++) {
-                mappedVoltages[channelMapping[i]] = voltages[i];
+                mappedVoltages[channelMapping[i]] = dataView.getFloat32(i * 4, true);
             }
 
-            // 更新每个通道的数据和显示
+            // 仅写入数据，不触碰 DOM
             for (let i = 0; i < 32; i++) {
                 const voltage = mappedVoltages[i];
-                const voltageV = voltage / 1000; // 转换为V单位
-
-                // 更新显示值
-                const voltageElement = document.getElementById(`voltage${i}`);
-                if (voltageElement) {
-                    voltageElement.textContent = voltage.toFixed(1);
-                }
-
-                // 存储数据
-                channelData[i].push({
-                    timestamp,
-                    voltage: voltageV,
-                    voltageMillivolt: voltage
-                });
+                channelData[i].push({ timestamp, voltage: voltage / 1000, voltageMillivolt: voltage });
             }
 
-            // 清理超过存储窗口的数据
-            cleanupOldData(STORAGE_WINDOW_MS);
+            // 滑动窗口记录时间戳，用于采样率计算
+            sampleTimestamps.push(timestamp);
+            if (sampleTimestamps.length > SAMPLE_RATE_WINDOW) sampleTimestamps.shift();
 
-            // 更新采样率显示
-            computeSamplingRate();
-
-            // 检查数据间隔
-            const frameInterval = lastUpdate ? timestamp - lastUpdate : EXPECTED_INTERVAL_MS;
             lastUpdate = timestamp;
 
-            if (Math.abs(frameInterval - EXPECTED_INTERVAL_MS) > 50) {
-                log(`数据间隔异常：${frameInterval.toFixed(0)} ms`);
+            // 有数据后启用导出按钮（用 length===1 只触发一次，避免每帧判断）
+            if (channelData[0].length === 1) {
+                exportBtn.disabled = false;
             }
-
-            // 更新图表
-            requestAnimationFrame(updateCharts);
         }
 
-        // 计算采样频率
+        // 使用滑动窗口计算采样率（精确且开销极低）
         function computeSamplingRate() {
-            if (channelData[0].length < 2) return;
-
-            const firstTime = channelData[0][0].timestamp;
-            const lastTime = channelData[0][channelData[0].length - 1].timestamp;
-            const durationMs = lastTime - firstTime;
-
+            if (sampleTimestamps.length < 2) return;
+            const first = sampleTimestamps[0];
+            const last = sampleTimestamps[sampleTimestamps.length - 1];
+            const durationMs = last - first;
             if (durationMs <= 0) return;
+            const frequency = (sampleTimestamps.length - 1) / (durationMs / 1000);
+            log(`采样频率：${frequency.toFixed(1)} Hz（最近 ${sampleTimestamps.length} 包）`);
+        }
 
-            const frequency = channelData[0].length / (durationMs / 1000);
-            log(`采样频率：${frequency.toFixed(1)} Hz`);
+        // ── 渲染循环：以固定 10Hz 节流刷新 UI，与蓝牙数据接收完全解耦 ──
+        function startRenderLoop() {
+            if (renderLoopId) return;
+            renderLoopId = setInterval(renderUI, RENDER_INTERVAL_MS);
+        }
+
+        function stopRenderLoop() {
+            if (renderLoopId) {
+                clearInterval(renderLoopId);
+                renderLoopId = null;
+            }
+        }
+
+        // ── BLE Keep-alive：维持短连接间隔，阻止 OS 省电降速 ──────────────
+        function startKeepAlive() {
+            stopKeepAlive();
+            keepAliveId = setInterval(async () => {
+                if (!writeCharacteristic || !device?.gatt?.connected) return;
+                try {
+                    // 优先用 writeValueWithoutResponse（无需 ACK，开销最小）
+                    if (typeof writeCharacteristic.writeValueWithoutResponse === 'function') {
+                        await writeCharacteristic.writeValueWithoutResponse(KEEP_ALIVE_PAYLOAD);
+                    } else {
+                        await writeCharacteristic.writeValue(KEEP_ALIVE_PAYLOAD);
+                    }
+                } catch (_) { /* 忽略写入错误，不影响主流程 */ }
+            }, KEEP_ALIVE_INTERVAL_MS);
+        }
+
+        function stopKeepAlive() {
+            if (keepAliveId) { clearInterval(keepAliveId); keepAliveId = null; }
+        }
+
+        function renderUI() {
+            if (!startTime || isPaused) return;
+
+            const now = Date.now();
+
+            // 1. 更新 32 路电压数字显示 + 图表（仅图表模式）
+            if (!samplingModeActive) {
+                for (let i = 0; i < 32; i++) {
+                    const arr = channelData[i];
+                    if (arr.length > 0) {
+                        const el = document.getElementById(`voltage${i}`);
+                        if (el) el.textContent = arr[arr.length - 1].voltageMillivolt.toFixed(1);
+                    }
+                }
+                updateCharts();
+            }
+
+            // 2. 定期清理旧数据（每 5 秒一次）
+            //    图表模式：只保留60秒；采样模式：保留完整5分钟
+            if (now - lastCleanupTime > CLEANUP_INTERVAL_MS) {
+                cleanupOldData(samplingModeActive ? SAMPLING_MAX_MS : DISPLAY_WINDOW_MS);
+                lastCleanupTime = now;
+            }
+
+            // 3. 采样模式：检查是否达到5分钟上限，到时自动停止
+            if (samplingModeActive && samplingStartTime !== null) {
+                const elapsed = now - samplingStartTime;
+                const remaining = SAMPLING_MAX_MS - elapsed;
+                if (remaining <= 0) {
+                    // 自动停止采样
+                    isPaused = true;
+                    pauseBtn.textContent = '恢复采样';
+                    pauseBtn.classList.remove('secondary');
+                    log('采样模式已达到5分钟上限，自动停止。请导出数据。');
+                    samplingStartTime = null;
+                } else if (remaining <= 30000 && Math.floor(remaining / 1000) % 10 === 0) {
+                    // 最后30秒内每10秒提示一次
+                    log(`采样模式：剩余 ${Math.ceil(remaining / 1000)} 秒`);
+                }
+            }
+
+            // 4. 定期输出采样率日志（每 3 秒一次）
+            if (now - lastSampleRateLogTime > SAMPLE_LOG_INTERVAL_MS) {
+                computeSamplingRate();
+                lastSampleRateLogTime = now;
+            }
         }
 
         // 连接蓝牙
         async function connect() {
             if (!supportsWebBluetooth()) {
                 log('当前浏览器不支持 Web Bluetooth。');
-                alert('当前浏览器不支持 Web Bluetooth，请尝试使用 Chrome、Edge 或 Android WebView。');
+                alert('当前浏览器不支持 Web Bluetooth, 请尝试使用 Chrome、Edge 或 Android WebView。');
                 return;
             }
 
@@ -771,175 +868,142 @@
                 await notifyCharacteristic.startNotifications();
                 notifyCharacteristic.addEventListener('characteristicvaluechanged', handleNotification);
 
-                // 初始化数据
-                for (let i = 0; i < 32; i++) {
-                    channelData[i] = [];
-                }
-
-                // 创建图表
+                for (let i = 0; i < 32; i++) channelData[i] = [];
+                sampleTimestamps.length = 0; // 清空滑动窗口
                 createCharts(currentViewMode);
-
-                // 启用导出按钮
                 exportBtn.disabled = false;
-
-                // 启动定时器（设置startTime）
                 startTimer();
+                startRenderLoop(); // 启动渲染循环
+                startKeepAlive(); // 启动BLE心跳，维持高采样率
 
-                // 重置暂停状态为false
-                isPaused = false;
-                pauseBtn.textContent = '暂停采样';
+                // 连接后默认暂停，需手动恢复
+                isPaused = true;
+                pauseBtn.textContent = '恢复采样';
+                pauseBtn.classList.remove('secondary'); // 蓝色
+
+                // 根据当前采样模式更新UI
+                applySamplingModeUI();
 
                 updateStatus(true, `已连接: ${device.name || '未知设备'}`);
-                log('蓝牙连接成功，开始接收32通道电压数据。');
+                log('蓝牙连接成功，已暂停采样，点击“恢复采样”开始接收数据。');
 
             } catch (error) {
                 log(`连接失败：${error.message}`);
                 updateStatus(false, '连接失败，请重试');
-
                 if (device && device.gatt && device.gatt.connected) {
                     device.gatt.disconnect();
                 }
             }
         }
 
-        // 断开连接
         async function disconnect() {
             if (notifyCharacteristic) {
-                try {
-                    await notifyCharacteristic.stopNotifications();
-                } catch (error) {
-                    log(`停止通知失败：${error.message}`);
-                }
+                try { await notifyCharacteristic.stopNotifications(); } catch (error) { log(`停止通知失败：${error.message}`); }
             }
-
             if (device && device.gatt && device.gatt.connected) {
                 device.gatt.disconnect();
             }
-
             notifyCharacteristic = null;
             writeCharacteristic = null;
             updateStatus(false, '已断开连接');
-            stopTimer(); // 停止计时器，但保留startTime以便图表显示
+            stopRenderLoop();
+            stopKeepAlive();
+            stopTimer();
             exportBtn.disabled = true;
             log('蓝牙连接已断开。');
         }
 
-        // 处理断开连接事件
         function handleDisconnection() {
             updateStatus(false, '已断开连接');
             log('蓝牙连接已断开。');
+            stopRenderLoop();
+            stopKeepAlive();
             stopTimer();
         }
 
         // 清除所有缓存和显示数据（重置计时）
         function clearAllData() {
-            // 清除所有通道数据
-            for (let i = 0; i < 32; i++) {
-                channelData[i] = [];
-            }
-
-            // 重置电压显示为"--"
+            for (let i = 0; i < 32; i++) channelData[i] = [];
+            sampleTimestamps.length = 0; // 重置采样率滑动窗口
+            samplingStartTime = null;    // 重置采样开始时间
             for (let i = 0; i < 32; i++) {
                 const voltageElement = document.getElementById(`voltage${i}`);
-                if (voltageElement) {
-                    voltageElement.textContent = '--';
-                }
+                if (voltageElement) voltageElement.textContent = '--';
             }
-
-            // 重置开始时间为当前时间（重新计时）
             startTime = Date.now();
-
-            // 重置最后更新时间
             lastUpdate = 0;
-
-            // 重置暂停状态为false
-            isPaused = false;
-            pauseBtn.textContent = '暂停采样';
-
-            // 清除图表数据
+            // 清除后默认暂停
+            isPaused = true;
+            pauseBtn.textContent = '恢复采样';
+            pauseBtn.classList.remove('secondary'); // 蓝色
             charts.forEach(chart => {
-                chart.data.datasets.forEach(dataset => {
-                    dataset.data = [];
-                });
+                chart.data.datasets.forEach(dataset => dataset.data = []);
                 chart.update('none');
             });
-
-            // 禁用导出按钮（因为无数据）
             exportBtn.disabled = true;
-
-            log('已清除所有缓存和显示数据，时间从当前重新开始');
+            log('已清除所有缓存和显示数据，时间从当前重新开始，采样暂停');
         }
 
-        // 切换暂停/恢复采样
         function togglePause() {
             if (!device || !device.gatt || !device.gatt.connected) {
                 log('未连接设备，无法暂停');
                 return;
             }
             isPaused = !isPaused;
-            pauseBtn.textContent = isPaused ? '恢复采样' : '暂停采样';
-            log(isPaused ? '采样已暂停，数据被忽略' : '采样已恢复');
+            if (isPaused) {
+                pauseBtn.textContent = '恢复采样';
+                pauseBtn.classList.remove('secondary'); // 蓝色
+                log('采样已暂停');
+            } else {
+                pauseBtn.textContent = '暂停采样';
+                pauseBtn.classList.add('secondary'); // 红色
+                lastCleanupTime = Date.now();
+                lastSampleRateLogTime = Date.now();
+                log('采样已恢复');
+            }
         }
 
-        // 导出数据（兼容手机端）
+        // 导出数据（兼容手机端，根据采样模式决定导出范围）
         function exportData() {
             if (typeof XLSX === 'undefined') {
                 alert('导出功能不可用：未加载 XLSX 库。');
                 return;
             }
 
-            // 获取存储窗口内的数据（最近180秒）
-            const now = Date.now();
-            const cutoff = now - STORAGE_WINDOW_MS;
+            // 图表模式：导出当前缓存的60秒数据；采样模式：导出全部已记录数据
+            const cutoff = samplingModeActive ? 0 : (Date.now() - DISPLAY_WINDOW_MS);
 
-            // 收集所有时间点
             const timeSet = new Set();
             const channelSamples = channelData.map(channel => {
                 return channel.filter(item => item.timestamp >= cutoff);
             });
 
-            channelSamples.forEach(samples => {
-                samples.forEach(sample => {
-                    timeSet.add(sample.timestamp);
-                });
-            });
-
+            channelSamples.forEach(samples => samples.forEach(sample => timeSet.add(sample.timestamp)));
             const sortedTimes = Array.from(timeSet).sort((a, b) => a - b);
 
             if (sortedTimes.length === 0) {
-                log(`${STORAGE_WINDOW_MS / 1000}秒内无数据可导出。`);
+                log(samplingModeActive ? '采样模式下无数据可导出。' : '最近60秒内无数据可导出。');
                 return;
             }
 
-            // 创建行数据
             const rows = sortedTimes.map(timestamp => {
                 const row = {
                     '时间': new Date(timestamp).toLocaleString('zh-CN', {
-                        year: 'numeric',
-                        month: '2-digit',
-                        day: '2-digit',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        second: '2-digit'
+                        year: 'numeric', month: '2-digit', day: '2-digit',
+                        hour: '2-digit', minute: '2-digit', second: '2-digit'
                     }),
                     '时间戳': timestamp
                 };
-
-                // 添加每个通道的电压值
                 for (let i = 0; i < 32; i++) {
                     const sample = channelSamples[i].find(s => s.timestamp === timestamp);
                     row[`CH${i + 1} (mV)`] = sample ? sample.voltageMillivolt.toFixed(1) : '';
                     row[`CH${i + 1} (V)`] = sample ? (sample.voltageMillivolt / 1000).toFixed(4) : '';
                 }
-
                 return row;
             });
 
-            // 创建表头
             const headers = ['时间', '时间戳'];
-            for (let i = 0; i < 32; i++) {
-                headers.push(`CH${i + 1} (mV)`, `CH${i + 1} (V)`);
-            }
+            for (let i = 0; i < 32; i++) headers.push(`CH${i + 1} (mV)`, `CH${i + 1} (V)`);
 
             const worksheet = XLSX.utils.json_to_sheet(rows, { header: headers });
             const workbook = XLSX.utils.book_new();
@@ -948,23 +1012,16 @@
             const timestampLabel = new Date().toISOString().replace(/[:.]/g, '-');
             const filename = `32ch_adc_${timestampLabel}.xlsx`;
 
-            // ----- 手机兼容的下载方式 -----
             try {
-                // 生成二进制字符串
                 const wbout = XLSX.write(workbook, { bookType: 'xlsx', type: 'binary' });
-
-                // 将二进制字符串转换为 ArrayBuffer
                 function s2ab(s) {
                     const buf = new ArrayBuffer(s.length);
                     const view = new Uint8Array(buf);
                     for (let i = 0; i < s.length; i++) view[i] = s.charCodeAt(i) & 0xFF;
                     return buf;
                 }
-
                 const buf = s2ab(wbout);
                 const blob = new Blob([buf], { type: 'application/octet-stream' });
-
-                // 创建下载链接并模拟点击
                 const url = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
@@ -974,40 +1031,80 @@
                 document.body.removeChild(a);
                 window.URL.revokeObjectURL(url);
 
-                log(`数据已导出为 ${filename}，包含 ${sortedTimes.length} 个采样点(最近180秒)`);
+                const modeText = samplingModeActive ? '采样模式' : '普通模式';
+                log(`数据已导出为 ${filename}，包含 ${sortedTimes.length} 个采样点 (${modeText})`);
             } catch (e) {
                 console.error('导出失败', e);
                 log('导出失败，请重试或检查浏览器兼容性');
             }
         }
 
-        // 切换显示模式
-        function setViewMode(mode) {
-            currentViewMode = mode;
+        // 应用采样模式UI变化
+        function applySamplingModeUI() {
+            if (samplingModeActive) {
+                voltageMetrics.classList.add('hidden');
+                chartsContainer.classList.add('hidden');
+                viewModeBtns.forEach(btn => btn.disabled = true);
+                samplingModeBtn.textContent = '退出采样';
+                samplingHint.classList.remove('hidden');
+                log('已进入采样模式，最多记录5分钟数据，图表已隐藏，采样自动开始');
+            } else {
+                voltageMetrics.classList.remove('hidden');
+                chartsContainer.classList.remove('hidden');
+                viewModeBtns.forEach(btn => btn.disabled = false);
+                samplingModeBtn.textContent = '采样模式';
+                samplingHint.classList.add('hidden');
+                if (device && device.gatt && device.gatt.connected) {
+                    createCharts(currentViewMode);
+                    updateCharts();
+                }
+                log('已退出采样模式，恢复图表显示（仅保留最近60秒数据）');
+            }
+        }
 
-            // 更新按钮状态
+        // 切换采样模式
+        function toggleSamplingMode() {
+            if (!device || !device.gatt || !device.gatt.connected) {
+                log('请先连接设备');
+                return;
+            }
+            samplingModeActive = !samplingModeActive;
+
+            if (samplingModeActive) {
+                clearAllData(); // 清空数据并重置计时
+                exportBtn.disabled = false;
+                samplingStartTime = Date.now(); // 记录采样开始时间
+                // 进入采样模式后自动恢复采样（无需手动点恢复）
+                isPaused = false;
+                pauseBtn.textContent = '暂停采样';
+                pauseBtn.classList.add('secondary');
+            } else {
+                samplingStartTime = null;
+            }
+
+            applySamplingModeUI();
+        }
+
+        function setViewMode(mode) {
+            if (samplingModeActive) {
+                log('采样模式下不能切换显示模式');
+                return;
+            }
+            currentViewMode = mode;
             viewModeBtns.forEach(btn => {
                 btn.classList.toggle('active', btn.dataset.mode === mode);
             });
-
-            // 重新创建图表
             if (device && device.gatt && device.gatt.connected) {
                 createCharts(mode);
                 updateCharts();
                 log(`切换显示模式为: ${getModeName(mode)}`);
             } else {
-                // 未连接时也可以预览空图表
                 createCharts(mode);
             }
         }
 
-        // 获取模式名称
         function getModeName(mode) {
-            const names = {
-                'single': '单通道显示',
-                'group4': '4通道一组',
-                'group8': '8通道一组'
-            };
+            const names = { 'single': '单通道显示', 'group4': '4通道一组', 'group8': '8通道一组' };
             return names[mode] || mode;
         }
 
@@ -1023,9 +1120,7 @@
         });
 
         exportBtn.addEventListener('click', exportData);
-
         pauseBtn.addEventListener('click', togglePause);
-
         clearBtn.addEventListener('click', () => {
             if (confirm('确定要清除所有缓存和显示数据吗？此操作不可撤销。')) {
                 clearAllData();
@@ -1033,15 +1128,14 @@
         });
 
         viewModeBtns.forEach(btn => {
-            btn.addEventListener('click', () => {
-                setViewMode(btn.dataset.mode);
-            });
+            btn.addEventListener('click', () => setViewMode(btn.dataset.mode));
         });
+
+        samplingModeBtn.addEventListener('click', toggleSamplingMode);
 
         // 初始化
         initVoltageMetrics();
         createCharts(currentViewMode);
-
         log('32通道ADC电压监测系统已就绪');
     </script>
 </body>
