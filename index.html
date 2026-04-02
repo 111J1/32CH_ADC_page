@@ -180,14 +180,53 @@
             padding: 1rem;
             box-shadow: 0 20px 40px -30px rgba(31, 50, 103, 0.45);
             position: relative;
-            height: 300px;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
         }
 
         .chart-title {
             font-size: 0.9rem;
             font-weight: 500;
-            margin-bottom: 0.5rem;
+            margin-bottom: 0;
             color: #3358f4;
+        }
+
+        .chart-canvas {
+            position: relative;
+            width: 100%;
+            height: var(--chart-height, 260px);
+        }
+
+        .chart-canvas canvas {
+            width: 100% !important;
+            height: 100% !important;
+        }
+
+        .chart-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+            gap: 0.4rem 0.6rem;
+        }
+
+        .chart-stat-item {
+            background: rgba(30, 44, 86, 0.06);
+            border-radius: 10px;
+            padding: 0.35rem 0.55rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.15rem;
+        }
+
+        .chart-stat-item span {
+            font-size: 0.72rem;
+            color: #5a6172;
+        }
+
+        .chart-stat-item strong {
+            font-size: 0.75rem;
+            font-weight: 500;
+            color: #1f2739;
         }
 
         .log {
@@ -244,7 +283,11 @@
             }
 
             .chart-wrapper {
-                height: 250px;
+                --chart-height: 220px;
+            }
+
+            .chart-stats {
+                grid-template-columns: 1fr;
             }
 
             .metrics-grid {
@@ -279,6 +322,18 @@
 
             .metric-item span {
                 color: #a8b0c7;
+            }
+
+            .chart-stat-item {
+                background: rgba(255, 255, 255, 0.08);
+            }
+
+            .chart-stat-item span {
+                color: #a8b0c7;
+            }
+
+            .chart-stat-item strong {
+                color: #e6edff;
             }
 
             .log {
@@ -415,6 +470,7 @@
         // 维持双向 BLE 流量，使 OS 保持短连接间隔（高性能模式）。
         const KEEP_ALIVE_INTERVAL_MS = 500;
         const KEEP_ALIVE_PAYLOAD = new Uint8Array([0x00]); // 1字节心跳包
+        const EMPTY_STATS_TEXT = '平均 -- | 最大 -- | 最小 --';
         const channelColors = [
             '#3358f4', '#ff6b6b', '#1ec65d', '#ffd166',
             '#06d6a0', '#118ab2', '#ef476f', '#7209b7',
@@ -541,6 +597,56 @@
             }
         }
 
+        function calculateChannelStats(points) {
+            if (!points || points.length === 0) return null;
+            let sum = 0;
+            let min = Infinity;
+            let max = -Infinity;
+
+            for (let i = 0; i < points.length; i++) {
+                const value = points[i].y;
+                sum += value;
+                if (value < min) min = value;
+                if (value > max) max = value;
+            }
+
+            return {
+                avg: sum / points.length,
+                min,
+                max
+            };
+        }
+
+        function formatStatValue(value) {
+            return Number.isFinite(value) ? `${value.toFixed(4)} V` : '--';
+        }
+
+        function updateChartStats(chart, displayPointsPerChannel) {
+            const channels = chart.$channels || [];
+            const statElements = chart.$statValueElements || {};
+
+            channels.forEach(channelIndex => {
+                const statElement = statElements[channelIndex];
+                if (!statElement) return;
+
+                const stats = calculateChannelStats(displayPointsPerChannel[channelIndex] || []);
+                if (!stats) {
+                    statElement.textContent = EMPTY_STATS_TEXT;
+                    return;
+                }
+
+                statElement.textContent =
+                    `平均 ${formatStatValue(stats.avg)} | 最大 ${formatStatValue(stats.max)} | 最小 ${formatStatValue(stats.min)}`;
+            });
+        }
+
+        function resetChartStats(chart) {
+            const statElements = chart.$statValueElements || {};
+            Object.values(statElements).forEach(element => {
+                element.textContent = EMPTY_STATS_TEXT;
+            });
+        }
+
         // 创建图表
         function createCharts(mode) {
             charts.forEach(chart => chart.destroy());
@@ -584,15 +690,38 @@
             chartConfigs.forEach((config) => {
                 const wrapper = document.createElement('div');
                 wrapper.className = 'chart-wrapper';
-                wrapper.style.height = `${config.height}px`;
+                wrapper.style.setProperty('--chart-height', `${config.height}px`);
 
                 const title = document.createElement('div');
                 title.className = 'chart-title';
                 title.textContent = config.title;
                 wrapper.appendChild(title);
 
+                const canvasContainer = document.createElement('div');
+                canvasContainer.className = 'chart-canvas';
                 const canvas = document.createElement('canvas');
-                wrapper.appendChild(canvas);
+                canvasContainer.appendChild(canvas);
+                wrapper.appendChild(canvasContainer);
+
+                const statsContainer = document.createElement('div');
+                statsContainer.className = 'chart-stats';
+                const statValueElements = {};
+                config.channels.forEach(ch => {
+                    const statItem = document.createElement('div');
+                    statItem.className = 'chart-stat-item';
+
+                    const channelLabel = document.createElement('span');
+                    channelLabel.textContent = `CH${ch + 1}`;
+
+                    const statValue = document.createElement('strong');
+                    statValue.textContent = EMPTY_STATS_TEXT;
+
+                    statItem.appendChild(channelLabel);
+                    statItem.appendChild(statValue);
+                    statsContainer.appendChild(statItem);
+                    statValueElements[ch] = statValue;
+                });
+                wrapper.appendChild(statsContainer);
                 chartsContainer.appendChild(wrapper);
 
                 const datasets = config.channels.map(ch => ({
@@ -644,6 +773,9 @@
                     }
                 });
 
+                chart.$channels = config.channels;
+                chart.$statValueElements = statValueElements;
+
                 charts.push(chart);
             });
         }
@@ -682,12 +814,20 @@
 
             charts.forEach(chart => {
                 let allVoltages = [];
-                chart.data.datasets.forEach(dataset => {
-                    const channelIndex = dataset.label.match(/CH(\d+)/)[1] - 1;
+                const chartChannels = chart.$channels || [];
+
+                chartChannels.forEach((channelIndex, datasetIndex) => {
                     const points = displayPointsPerChannel[channelIndex] || [];
+                    const dataset = chart.data.datasets[datasetIndex];
+                    if (!dataset) return;
                     dataset.data = points;
-                    allVoltages = allVoltages.concat(points.map(p => p.y));
+
+                    for (let i = 0; i < points.length; i++) {
+                        allVoltages.push(points[i].y);
+                    }
                 });
+
+                updateChartStats(chart, displayPointsPerChannel);
 
                 if (allVoltages.length > 0) {
                     let minV = Math.min(...allVoltages);
@@ -938,6 +1078,7 @@
             pauseBtn.classList.remove('secondary'); // 蓝色
             charts.forEach(chart => {
                 chart.data.datasets.forEach(dataset => dataset.data = []);
+                resetChartStats(chart);
                 chart.update('none');
             });
             exportBtn.disabled = true;
@@ -986,13 +1127,16 @@
                 return;
             }
 
+            // 以导出数据中的首个采样点作为0ms基准
+            const baseTimestamp = sortedTimes[0];
+
             const rows = sortedTimes.map(timestamp => {
                 const row = {
                     '时间': new Date(timestamp).toLocaleString('zh-CN', {
                         year: 'numeric', month: '2-digit', day: '2-digit',
                         hour: '2-digit', minute: '2-digit', second: '2-digit'
                     }),
-                    '时间戳': timestamp
+                    '相对时间(ms)': timestamp - baseTimestamp
                 };
                 for (let i = 0; i < 32; i++) {
                     const sample = channelSamples[i].find(s => s.timestamp === timestamp);
@@ -1002,7 +1146,7 @@
                 return row;
             });
 
-            const headers = ['时间', '时间戳'];
+            const headers = ['时间', '相对时间(ms)'];
             for (let i = 0; i < 32; i++) headers.push(`CH${i + 1} (mV)`, `CH${i + 1} (V)`);
 
             const worksheet = XLSX.utils.json_to_sheet(rows, { header: headers });
